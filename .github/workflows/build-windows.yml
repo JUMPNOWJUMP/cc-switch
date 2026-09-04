@@ -1,0 +1,116 @@
+name: Build Windows (PR #6941 fix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (commit/branch/tag from upstream farion1231/cc-switch)'
+        required: false
+        default: 'd8065cc628fcd373d00c4363d718095f19e78c9e'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-6941-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build Windows x64 (unsigned)
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout upstream ref
+        uses: actions/checkout@v4
+        with:
+          repository: farion1231/cc-switch
+          ref: ${{ inputs.ref || 'd8065cc628fcd373d00c4363d718095f19e78c9e' }}
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Show checked-out commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git rev-parse HEAD
+          git log -1 --pretty=%s
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.12.3 --activate
+          node --version
+          pnpm --version
+
+      - name: Cache pnpm store
+        id: pnpm-cache
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm store (restore)
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-store-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri (Windows x64, unsigned)
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
+        env:
+          # Disable updater signing; we are not producing an updater artifact
+          TAURI_SIGNING_PRIVATE_KEY: ""
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: List build outputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -Recurse -Path src-tauri\target\x86_64-pc-windows-msvc\release\bundle -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length
+
+      - name: Stage installer artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
+          $stage = "$RUNNER_TEMP\stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $msi = Get-ChildItem -Path "$bundle\msi" -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nsis = Get-ChildItem -Path "$bundle\nsis" -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (-not $msi) { throw "MSI not found under $bundle\msi" }
+          if (-not $nsis) { throw "NSIS installer (.exe) not found under $bundle\nsis" }
+
+          Copy-Item $msi.FullName -Destination (Join-Path $stage $msi.Name)
+          Copy-Item $nsis.FullName -Destination (Join-Path $stage $nsis.Name)
+
+          $commitShort = (git rev-parse --short HEAD).Trim()
+          $zipPath = Join-Path $RUNNER_TEMP "CC-Switch-6941fix-Windows-x64-$commitShort.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath)
+          Write-Host "Staged archive: $zipPath"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-switch-6941fix-windows-x64
+          path: ${{ runner.temp }}/CC-Switch-6941fix-Windows-x64-*.zip
+          if-no-files-found: error
+          retention-days: 14
