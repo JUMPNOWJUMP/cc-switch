@@ -76,29 +76,30 @@ jobs:
         # "failed to decode secret key: Wrong password for that key". We do not
         # have the real private key, so we generate a fresh keypair and then
         # rewrite the pubkey in tauri.conf.json to match. The resulting
-        # installer ships with a throwaway updater pubkey (the auto-update
-        # feature will not work; the app's main functionality is unaffected).
+        # installer ships with a throwaway updater pubkey (auto-update will
+        # not work; the app's main functionality is unaffected).
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $keyDir = Join-Path $env:RUNNER_TEMP 'tauri'
           New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
           $keyPath = Join-Path $keyDir 'signing.key'
-          $pubPath = Join-Path $keyDir 'signing.pub'
-          pnpm exec tauri signer generate --ci -w $keyPath -p $pubPath
+          pnpm exec tauri signer generate --ci -w $keyPath -f
 
-          # Read the public key base64 from the generated .pub file.
-          # `tauri signer generate` writes the .pub file in the same two-line
-          # minisign format as the .key file; the second line is
-          # "unencrypted:<base64>" or "encrypted:<base64>". We only need the
-          # base64 payload to plug into tauri.conf.json.
-          $pubRaw = Get-Content -Raw $pubPath
-          $pubB64 = ($pubRaw -split "`n")[1].Trim()
-          Write-Host "Generated pubkey payload:"
-          Write-Host $pubB64
+          # tauri signer generate writes the public key to <keypath>.pub. The
+          # file is in the same two-line minisign text format as the private
+          # key. tauri.conf.json's plugins.updater.pubkey is the *entire file*
+          # base64-encoded, NOT a raw 32-byte Ed25519 pubkey.
+          $pubPath = "$keyPath.pub"
+          if (-not (Test-Path $pubPath)) {
+            throw "Public key file not found at $pubPath"
+          }
+          $pubBytes = [System.IO.File]::ReadAllBytes($pubPath)
+          $pubB64 = [Convert]::ToBase64String($pubBytes)
+          Write-Host "Public key file size: $($pubBytes.Length) bytes"
+          Write-Host "Base64-encoded pubkey: $pubB64"
 
-          # Rewrite tauri.conf.json so plugins.updater.pubkey matches the
-          # generated private key.
+          # Rewrite tauri.conf.json so plugins.updater.pubkey matches.
           $confPath = 'src-tauri/tauri.conf.json'
           $conf = Get-Content -Raw $confPath | ConvertFrom-Json
           $conf.plugins.updater.pubkey = $pubB64
