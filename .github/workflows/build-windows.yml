@@ -70,52 +70,29 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Generate throwaway minisign key for tauri updater
-        # tauri.conf.json hardcodes plugins.updater.pubkey. tauri build requires
-        # the matching private key to be present, otherwise it fails with
-        # "failed to decode secret key: Wrong password for that key". We do not
-        # have the real private key, so we generate a fresh keypair and then
-        # rewrite the pubkey in tauri.conf.json to match. The resulting
-        # installer ships with a throwaway updater pubkey (auto-update will
-        # not work; the app's main functionality is unaffected).
+      - name: Strip plugins.updater from tauri.conf.json
+        # tauri.conf.json sets plugins.updater = { pubkey, endpoints }, which
+        # makes tauri build require a matching private key at compile time
+        # (the tauri-plugin-updater crate is wired in lib.rs). We don't have
+        # the upstream maintainer's private key, so we null out the entire
+        # plugins.updater block in the build workspace. The compiled app will
+        # ship without the auto-update feature; the main functionality is
+        # unaffected. (Auto-update can be re-enabled by replacing this block
+        # once upstream releases a build with a known pubkey.)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $keyDir = Join-Path $env:RUNNER_TEMP 'tauri'
-          New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
-          $keyPath = Join-Path $keyDir 'signing.key'
-          pnpm exec tauri signer generate --ci -w $keyPath -f
-
-          # tauri signer generate writes the public key to <keypath>.pub. The
-          # file is in the same two-line minisign text format as the private
-          # key. tauri.conf.json's plugins.updater.pubkey is the *entire file*
-          # base64-encoded, NOT a raw 32-byte Ed25519 pubkey.
-          $pubPath = "$keyPath.pub"
-          if (-not (Test-Path $pubPath)) {
-            throw "Public key file not found at $pubPath"
-          }
-          $pubBytes = [System.IO.File]::ReadAllBytes($pubPath)
-          $pubB64 = [Convert]::ToBase64String($pubBytes)
-          Write-Host "Public key file size: $($pubBytes.Length) bytes"
-          Write-Host "Base64-encoded pubkey: $pubB64"
-
-          # Rewrite tauri.conf.json so plugins.updater.pubkey matches.
           $confPath = 'src-tauri/tauri.conf.json'
           $conf = Get-Content -Raw $confPath | ConvertFrom-Json
-          $conf.plugins.updater.pubkey = $pubB64
+          $conf.plugins.updater = $null
           $json = $conf | ConvertTo-Json -Depth 32
           Set-Content -Path $confPath -Value $json -NoNewline -Encoding utf8
-
-          Write-Host "Updated plugins.updater.pubkey in tauri.conf.json"
-          Get-ChildItem $keyDir | Format-Table Name, Length
+          Write-Host "Stripped plugins.updater from tauri.conf.json"
+          $verify = Get-Content -Raw $confPath | ConvertFrom-Json
+          Write-Host "plugins.updater is now: $($verify.plugins.updater)"
 
       - name: Build Tauri (Windows x64, unsigned)
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
-        env:
-          # `tauri signer generate` produces an unencrypted minisign key;
-          # do NOT set TAURI_SIGNING_PRIVATE_KEY_PASSWORD or tauri treats it
-          # as a wrong-password key.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/tauri/signing.key
 
       - name: List build outputs
         shell: pwsh
