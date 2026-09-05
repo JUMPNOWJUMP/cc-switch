@@ -74,27 +74,20 @@ jobs:
         # tauri.conf.json sets bundle.updater.active=true with a public key,
         # so tauri build requires a matching private key to be present. The
         # resulting updater artifacts are not what we ship, only the .msi and
-        # .exe installers; any minisign key satisfies the check, so we generate
-        # a throwaway one here.
+        # .exe installers; any minisign key satisfies the check, so we use
+        # `tauri signer generate` to make a throwaway pair (default empty
+        # passphrase, matches the format tauri expects).
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $keyDir = Join-Path $env:RUNNER_TEMP 'tauri'
           New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
           $keyPath = Join-Path $keyDir 'signing.key'
-          if (-not (Test-Path $keyPath)) {
-            $npx = (Get-Command npx).Source
-            & $npx --yes minisign -G -p "$keyDir\signing.pub" -s "$keyPath" -W
-            # minisign requires a passphrase; clear the one it just wrote and
-            # rewrite the secret-key file with an empty passphrase line so
-            # tauri can read it non-interactively.
-            $keyText = Get-Content -Raw $keyPath
-            $keyText | Out-File -FilePath $keyPath -NoNewline -Encoding utf8
-          }
+          $pubPath = Join-Path $keyDir 'signing.pub'
+          pnpm exec tauri signer generate -w $keyPath -p $pubPath
           Write-Host "key=$keyPath"
-        env:
-          # minisign needs an empty passphrase to avoid the interactive prompt
-          MINISIGN_PASS: ''
+          Write-Host "pub=$pubPath"
+          Get-ChildItem $keyDir | Format-Table Name, Length
 
       - name: Build Tauri (Windows x64, unsigned)
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
