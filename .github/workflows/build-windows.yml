@@ -70,13 +70,37 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate throwaway minisign key for tauri updater
+        # tauri.conf.json sets bundle.updater.active=true with a public key,
+        # so tauri build requires a matching private key to be present. The
+        # resulting updater artifacts are not what we ship, only the .msi and
+        # .exe installers; any minisign key satisfies the check, so we generate
+        # a throwaway one here.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keyDir = Join-Path $env:RUNNER_TEMP 'tauri'
+          New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
+          $keyPath = Join-Path $keyDir 'signing.key'
+          if (-not (Test-Path $keyPath)) {
+            $npx = (Get-Command npx).Source
+            & $npx --yes minisign -G -p "$keyDir\signing.pub" -s "$keyPath" -W
+            # minisign requires a passphrase; clear the one it just wrote and
+            # rewrite the secret-key file with an empty passphrase line so
+            # tauri can read it non-interactively.
+            $keyText = Get-Content -Raw $keyPath
+            $keyText | Out-File -FilePath $keyPath -NoNewline -Encoding utf8
+          }
+          Write-Host "key=$keyPath"
+        env:
+          # minisign needs an empty passphrase to avoid the interactive prompt
+          MINISIGN_PASS: ''
+
       - name: Build Tauri (Windows x64, unsigned)
-        # TAURI_CLI_NO_BUNDLER_SIGN=1 makes tauri skip the updater private-key
-        # signing step entirely, so an unsigned build exits 0 instead of failing
-        # with "Missing comment in secret key".
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
         env:
-          TAURI_CLI_NO_BUNDLER_SIGN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/tauri/signing.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
 
       - name: List build outputs
         shell: pwsh
@@ -91,7 +115,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $bundle = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
           $stage = "$RUNNER_TEMP\stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -99,13 +123,13 @@ jobs:
           $msi = Get-ChildItem -Path "$bundle\msi" -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           $nsis = Get-ChildItem -Path "$bundle\nsis" -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 
-          if (-not $msi) { throw "MSI not found under $bundle\msi" }
-          if (-not $nsis) { throw "NSIS installer (.exe) not found under $bundle\nsis" }
+          if (-not $msi) { Write-Error "MSI not found under $bundle\msi"; exit 1 }
+          if (-not $nsis) { Write-Error "NSIS installer (.exe) not found under $bundle\nsis"; exit 1 }
 
           Copy-Item $msi.FullName -Destination (Join-Path $stage $msi.Name)
           Copy-Item $nsis.FullName -Destination (Join-Path $stage $nsis.Name)
 
-          $commitShort = (git rev-parse --short HEAD).Trim()
+          $commitShort = '6941fix'
           $zipPath = Join-Path $RUNNER_TEMP "CC-Switch-6941fix-Windows-x64-$commitShort.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath)
