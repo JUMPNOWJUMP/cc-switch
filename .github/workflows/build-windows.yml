@@ -71,12 +71,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Generate throwaway minisign key for tauri updater
-        # tauri.conf.json sets bundle.updater.active=true with a public key,
-        # so tauri build requires a matching private key to be present. The
-        # resulting updater artifacts are not what we ship, only the .msi and
-        # .exe installers; any minisign key satisfies the check, so we use
-        # `tauri signer generate` to make a throwaway pair (default empty
-        # passphrase, matches the format tauri expects).
+        # tauri.conf.json hardcodes plugins.updater.pubkey. tauri build requires
+        # the matching private key to be present, otherwise it fails with
+        # "failed to decode secret key: Wrong password for that key". We do not
+        # have the real private key, so we generate a fresh keypair and then
+        # rewrite the pubkey in tauri.conf.json to match. The resulting
+        # installer ships with a throwaway updater pubkey (the auto-update
+        # feature will not work; the app's main functionality is unaffected).
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -85,8 +86,26 @@ jobs:
           $keyPath = Join-Path $keyDir 'signing.key'
           $pubPath = Join-Path $keyDir 'signing.pub'
           pnpm exec tauri signer generate --ci -w $keyPath -p $pubPath
-          Write-Host "key=$keyPath"
-          Write-Host "pub=$pubPath"
+
+          # Read the public key base64 from the generated .pub file.
+          # `tauri signer generate` writes the .pub file in the same two-line
+          # minisign format as the .key file; the second line is
+          # "unencrypted:<base64>" or "encrypted:<base64>". We only need the
+          # base64 payload to plug into tauri.conf.json.
+          $pubRaw = Get-Content -Raw $pubPath
+          $pubB64 = ($pubRaw -split "`n")[1].Trim()
+          Write-Host "Generated pubkey payload:"
+          Write-Host $pubB64
+
+          # Rewrite tauri.conf.json so plugins.updater.pubkey matches the
+          # generated private key.
+          $confPath = 'src-tauri/tauri.conf.json'
+          $conf = Get-Content -Raw $confPath | ConvertFrom-Json
+          $conf.plugins.updater.pubkey = $pubB64
+          $json = $conf | ConvertTo-Json -Depth 32
+          Set-Content -Path $confPath -Value $json -NoNewline -Encoding utf8
+
+          Write-Host "Updated plugins.updater.pubkey in tauri.conf.json"
           Get-ChildItem $keyDir | Format-Table Name, Length
 
       - name: Build Tauri (Windows x64, unsigned)
@@ -112,11 +131,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $bundle = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
-          $stage = "$RUNNER_TEMP\stage"
+          $stage = Join-Path $env:RUNNER_TEMP 'stage'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          $msi = Get-ChildItem -Path "$bundle\msi" -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
-          $nsis = Get-ChildItem -Path "$bundle\nsis" -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path (Join-Path $bundle 'msi') -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nsis = Get-ChildItem -Path (Join-Path $bundle 'nsis') -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 
           if (-not $msi) { Write-Error "MSI not found under $bundle\msi"; exit 1 }
           if (-not $nsis) { Write-Error "NSIS installer (.exe) not found under $bundle\nsis"; exit 1 }
@@ -125,7 +144,7 @@ jobs:
           Copy-Item $nsis.FullName -Destination (Join-Path $stage $nsis.Name)
 
           $commitShort = '6941fix'
-          $zipPath = Join-Path $RUNNER_TEMP "CC-Switch-6941fix-Windows-x64-$commitShort.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP "CC-Switch-6941fix-Windows-x64-$commitShort.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zipPath)
           Write-Host "Staged archive: $zipPath"
