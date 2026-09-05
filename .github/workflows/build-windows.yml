@@ -71,11 +71,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri (Windows x64, unsigned)
+        # TAURI_CLI_NO_BUNDLER_SIGN=1 makes tauri skip the updater private-key
+        # signing step entirely, so an unsigned build exits 0 instead of failing
+        # with "Missing comment in secret key".
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
         env:
-          # Disable updater signing; we are not producing an updater artifact
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          TAURI_CLI_NO_BUNDLER_SIGN: "1"
 
       - name: List build outputs
         shell: pwsh
@@ -85,6 +86,9 @@ jobs:
             Select-Object FullName, Length
 
       - name: Stage installer artifacts
+        # if: always() so the installers still get packaged even if a downstream
+        # step of `tauri build` (e.g. updater signing) returns non-zero.
+        if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
