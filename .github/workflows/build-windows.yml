@@ -92,8 +92,10 @@ jobs:
       - name: Build Tauri (Windows x64, unsigned)
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi nsis
         env:
+          # `tauri signer generate` produces an unencrypted minisign key;
+          # do NOT set TAURI_SIGNING_PRIVATE_KEY_PASSWORD or tauri treats it
+          # as a wrong-password key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/tauri/signing.key
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
 
       - name: List build outputs
         shell: pwsh
